@@ -5,135 +5,152 @@ import PODSSimulationEngine from './simulation';
 const app: Express = express();
 const port = process.env.PORT || 3001;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Initialize simulation engine
 const simulation = new PODSSimulationEngine();
 let isRunning = false;
 
-// Subscribe to state changes (broadcast to WebSocket clients later)
 let lastState = simulation.getState();
-simulation.subscribe((state) => {
-  lastState = state;
-});
+simulation.subscribe(state => { lastState = state; });
 
-// Routes
+// ─── Core ─────────────────────────────────────────────────────────────────────
 
-// Health check
-app.get('/health', (req: Request, res: Response) => {
+app.get('/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Get current simulation state
-app.get('/api/simulation/state', (req: Request, res: Response) => {
-  res.json(lastState);
+app.get('/api/simulation/state', (_req: Request, res: Response) => {
+  res.json({ ...lastState, isRunning });
 });
 
-// Get financial metrics
-app.get('/api/simulation/metrics', (req: Request, res: Response) => {
-  const metrics = simulation.getFinancialMetrics();
-  res.json(metrics);
+app.get('/api/simulation/metrics', (_req: Request, res: Response) => {
+  res.json(simulation.getFinancialMetrics());
 });
 
-// Start simulation
-app.post('/api/simulation/start', (req: Request, res: Response) => {
-  if (!isRunning) {
-    simulation.start();
-    isRunning = true;
-  }
+app.post('/api/simulation/start', (_req: Request, res: Response) => {
+  if (!isRunning) { simulation.start(); isRunning = true; }
   res.json({ status: 'started', isRunning });
 });
 
-// Stop simulation
-app.post('/api/simulation/stop', (req: Request, res: Response) => {
-  if (isRunning) {
-    simulation.stop();
-    isRunning = false;
-  }
+app.post('/api/simulation/stop', (_req: Request, res: Response) => {
+  if (isRunning) { simulation.stop(); isRunning = false; }
   res.json({ status: 'stopped', isRunning });
 });
 
-// Set simulation speed (1-8x)
 app.post('/api/simulation/speed', (req: Request, res: Response) => {
   const { speed } = req.body;
-  if (typeof speed !== 'number' || speed < 1 || speed > 8) {
-    return res.status(400).json({ error: 'Speed must be between 1 and 8' });
+  if (typeof speed !== 'number' || speed < 1 || speed > 365) {
+    return res.status(400).json({ error: 'Speed must be 1–365' });
   }
   simulation.setSpeed(speed);
   res.json({ speed, isRunning });
 });
 
-// Add new route
+// ─── Network ──────────────────────────────────────────────────────────────────
+
+app.get('/api/cities',  (_req: Request, res: Response) => res.json(lastState.cities));
+app.get('/api/routes',  (_req: Request, res: Response) => res.json(lastState.routes));
+app.get('/api/pods',    (_req: Request, res: Response) => res.json(lastState.pods));
+app.get('/api/regions', (_req: Request, res: Response) => res.json(lastState.regions));
+
 app.post('/api/routes/add', (req: Request, res: Response) => {
   const { fromCityId, toCityId, maglev } = req.body;
-  if (!fromCityId || !toCityId) {
-    return res.status(400).json({ error: 'Missing required fields' });
-  }
-
+  if (!fromCityId || !toCityId) return res.status(400).json({ error: 'Missing fields' });
   try {
-    const route = simulation.addRoute(fromCityId, toCityId, maglev || false);
-    res.json(route);
-  } catch (error: any) {
-    res.status(400).json({ error: error.message });
+    res.json(simulation.addRoute(fromCityId, toCityId, maglev || false));
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
   }
 });
 
-// Operationalize route
 app.post('/api/routes/:routeId/operationalize', (req: Request, res: Response) => {
   try {
     simulation.operationalizeRoute(req.params.routeId);
     res.json({ status: 'operationalized' });
-  } catch (error: any) {
-    res.status(400).json({ error: error.message });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
   }
 });
 
-// Get cities
-app.get('/api/cities', (req: Request, res: Response) => {
-  res.json(lastState.cities);
-});
+// ─── Analytics ────────────────────────────────────────────────────────────────
 
-// Get routes
-app.get('/api/routes', (req: Request, res: Response) => {
-  res.json(lastState.routes);
-});
-
-// Get pods
-app.get('/api/pods', (req: Request, res: Response) => {
-  res.json(lastState.pods);
-});
-
-// Get daily metrics (history)
 app.get('/api/metrics/history', (req: Request, res: Response) => {
   const days = parseInt(req.query.days as string) || 365;
-  const history = lastState.dailyMetrics.slice(-days);
-  res.json(history);
+  res.json(lastState.dailyMetrics.slice(-days));
 });
 
-// Error handler
-app.use((err: any, req: Request, res: Response) => {
+app.get('/api/regional-metrics', (_req: Request, res: Response) => {
+  res.json(lastState.latestRegionalMetrics);
+});
+
+app.get('/api/maintenance', (req: Request, res: Response) => {
+  const { active, upcoming } = req.query;
+  let events = lastState.maintenanceEvents;
+  if (active === 'true')   events = events.filter(e => e.active);
+  if (upcoming === 'true') events = events.filter(e => e.startDay > lastState.simulationDay).slice(0, 10);
+  res.json(events);
+});
+
+app.get('/api/modal-chains', (_req: Request, res: Response) => {
+  const recent = lastState.dailyMetrics.slice(-7);
+  if (recent.length === 0) return res.json([]);
+
+  // Aggregate last 7 days of modal chains
+  const aggregated: Record<string, { chain: string; tripCount: number; avgDistanceKm: number; tripType: string }> = {};
+  recent.forEach(d => {
+    d.modalChains.forEach(c => {
+      if (!aggregated[c.chain]) {
+        aggregated[c.chain] = { chain: c.chain, tripCount: 0, avgDistanceKm: c.avgDistanceKm, tripType: c.tripType };
+      }
+      aggregated[c.chain].tripCount += c.tripCount;
+    });
+  });
+
+  res.json(Object.values(aggregated).sort((a, b) => b.tripCount - a.tripCount));
+});
+
+app.get('/api/capex', (req: Request, res: Response) => {
+  const days = parseInt(req.query.days as string) || 90;
+  const metrics = simulation.getFinancialMetrics();
+  const recentLog = lastState.capexLog.slice(-days);
+  res.json({ summary: metrics.capexByCategory, log: recentLog, cumulative: metrics.cumulativeCapEx });
+});
+
+app.get('/api/demand', (_req: Request, res: Response) => {
+  const recent = lastState.dailyMetrics.slice(-30);
+  const latest = lastState.dailyMetrics.slice(-1)[0]?.demand ?? null;
+  const trend   = recent.map(m => ({ date: m.date, servedTrips: m.demand?.servedTrips ?? 0, fulfillmentRate: m.demand?.fulfillmentRate ?? 0, potentialTrips: m.demand?.potentialTrips ?? 0 }));
+  res.json({ latest, trend, coverageByCity: lastState.coverageByCity });
+});
+
+app.get('/api/rollout', (_req: Request, res: Response) => {
+  const rolloutRoutes = lastState.routes
+    .filter(r => r.statusCode !== 'operational')
+    .map(r => {
+      const from = lastState.cities.find(c => c.id === r.fromCityId);
+      const to   = lastState.cities.find(c => c.id === r.toCityId);
+      return {
+        ...r,
+        fromCityName: from?.name,
+        toCityName:   to?.name,
+        daysUntilOpen: r.estimatedOpenDay
+          ? Math.max(0, r.estimatedOpenDay - lastState.simulationDay)
+          : null,
+      };
+    });
+  res.json(rolloutRoutes);
+});
+
+// ─── Error handler ────────────────────────────────────────────────────────────
+
+app.use((err: any, _req: Request, res: Response) => {
   console.error('Error:', err);
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// Start server
 app.listen(port, () => {
   console.log(`PODS Simulation API running on http://localhost:${port}`);
-  console.log('Available endpoints:');
-  console.log('  GET  /health');
-  console.log('  GET  /api/simulation/state');
-  console.log('  GET  /api/simulation/metrics');
-  console.log('  POST /api/simulation/start');
-  console.log('  POST /api/simulation/stop');
-  console.log('  POST /api/simulation/speed { speed: 1-8 }');
-  console.log('  POST /api/routes/add { fromCityId, toCityId, maglev }');
-  console.log('  POST /api/routes/:routeId/operationalize');
-  console.log('  GET  /api/cities');
-  console.log('  GET  /api/routes');
-  console.log('  GET  /api/pods');
-  console.log('  GET  /api/metrics/history?days=365');
 });
 
 export default app;
