@@ -1,0 +1,14 @@
+# Development build
+FROM node:18-alpine as backend
+WORKDIR /app/backend
+COPY backend/package*.json ./
+RUN npm install
+COPY backend . .
+EXPOSE 3001
+
+FROM node:18-alpine as frontend
+WORKDIR /app/frontend
+COPY frontend/package*.json ./
+RUN npm install
+COPY frontend . .
+EXPOSE 3000

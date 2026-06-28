@@ -1,0 +1,39 @@
+version: '3.9'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+      target: backend
+    ports:
+      - "3001:3001"
+    environment:
+      NODE_ENV: development
+      PORT: 3001
+    volumes:
+      - ./backend/src:/app/backend/src
+    command: npm run dev
+    networks:
+      - pods-network
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+      target: frontend
+    ports:
+      - "3000:3000"
+    environment:
+      REACT_APP_API_URL: http://localhost:3001/api
+    volumes:
+      - ./frontend/src:/app/frontend/src
+    depends_on:
+      - backend
+    command: npm start
+    networks:
+      - pods-network
+
+networks:
+  pods-network:
+    driver: bridge
