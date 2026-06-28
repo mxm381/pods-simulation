@@ -121,7 +121,7 @@ app.get('/api/demand', (_req: Request, res: Response) => {
   const recent = lastState.dailyMetrics.slice(-30);
   const latest = lastState.dailyMetrics.slice(-1)[0]?.demand ?? null;
   const trend   = recent.map(m => ({ date: m.date, servedTrips: m.demand?.servedTrips ?? 0, fulfillmentRate: m.demand?.fulfillmentRate ?? 0, potentialTrips: m.demand?.potentialTrips ?? 0 }));
-  res.json({ latest, trend, coverageByCity: lastState.coverageByCity });
+  res.json({ latest, trend, coverageByCity: lastState.coverageByCity, topPairs: latest?.topPairs ?? [] });
 });
 
 app.get('/api/rollout', (_req: Request, res: Response) => {
@@ -140,6 +140,15 @@ app.get('/api/rollout', (_req: Request, res: Response) => {
       };
     });
   res.json(rolloutRoutes);
+});
+
+app.get('/api/innercity', (_req: Request, res: Response) => {
+  res.json(lastState.innercityNetworks ?? []);
+});
+
+app.get('/api/expansion-recommendations', (_req: Request, res: Response) => {
+  // Re-compute on demand so the UI always gets fresh results
+  res.json(lastState.expansionRecommendations ?? []);
 });
 
 // ─── Error handler ────────────────────────────────────────────────────────────

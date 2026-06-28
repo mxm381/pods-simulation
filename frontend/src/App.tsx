@@ -52,10 +52,20 @@ interface FinMetrics {
 }
 interface ModalChain { chain: string; tripCount: number; avgDistanceKm: number; tripType: string; }
 
+interface CandidateCity { id: string; name: string; country: string; lat: number; lng: number; population: number; }
+interface ExpansionRec {
+  candidate: CandidateCity;
+  score: number; reason: string; estimatedDailyDemandGain: number;
+  bridgesCorridors: string[];
+  suggestedRoutes: { toCity: string; timeSavingPct: number }[];
+}
+interface InnercityLine { cityId: string; mode: string; name: string; coverageRadiusKm: number; dailyCapacity: number; operational: boolean; openDay: number; }
+interface InnercityNetwork { cityId: string; lines: InnercityLine[]; combinedCoverage: number; dailyLocalTrips: number; }
+
 // ─── Map projection ───────────────────────────────────────────────────────────
 
-const MAP_W = 700, MAP_H = 430;
-const LAT_MIN = 46.5, LAT_MAX = 54.5, LNG_MIN = 1.5, LNG_MAX = 17.5;
+const MAP_W = 800, MAP_H = 500;
+const LAT_MIN = 43.0, LAT_MAX = 57.5, LNG_MIN = -2.0, LNG_MAX = 22.5;
 function project(lat: number, lng: number) {
   return {
     x: Math.round(((lng - LNG_MIN) / (LNG_MAX - LNG_MIN)) * MAP_W),
@@ -86,6 +96,8 @@ export default function App() {
   const [state, setState] = useState<SimState | null>(null);
   const [metrics, setMetrics] = useState<FinMetrics | null>(null);
   const [chains, setChains] = useState<ModalChain[]>([]);
+  const [expansions, setExpansions] = useState<ExpansionRec[]>([]);
+  const [innercity, setInnercity] = useState<InnercityNetwork[]>([]);
   const [speed, setSpeed] = useState(1);
   const [error, setError] = useState<string | null>(null);
 
@@ -98,14 +110,17 @@ export default function App() {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [stRes, mRes, cRes] = await Promise.all([
+      const [stRes, mRes, cRes, eRes, iRes] = await Promise.all([
         fetch(`${API}/api/simulation/state`),
         fetch(`${API}/api/simulation/metrics`),
         fetch(`${API}/api/modal-chains`),
+        fetch(`${API}/api/expansion-recommendations`),
+        fetch(`${API}/api/innercity`),
       ]);
       if (!stRes.ok || !mRes.ok) throw new Error('API error');
-      const [s, m, c] = await Promise.all([stRes.json(), mRes.json(), cRes.json()]);
+      const [s, m, c, e, i] = await Promise.all([stRes.json(), mRes.json(), cRes.json(), eRes.json(), iRes.json()]);
       setState(s); setMetrics(m); setChains(c);
+      setExpansions(e); setInnercity(i);
       setError(null);
     } catch {
       setError('Cannot reach backend at localhost:3001');
@@ -167,7 +182,7 @@ export default function App() {
         {tab === 'map'        && <MapTab state={state} />}
         {tab === 'operations' && <OperationsTab state={state} metrics={metrics} />}
         {tab === 'journey'    && <JourneyTab chains={chains} regional={state?.latestRegionalMetrics ?? []} history={state?.dailyMetrics ?? []} />}
-        {tab === 'strategy'   && <StrategyTab state={state} metrics={metrics} />}
+        {tab === 'strategy'   && <StrategyTab state={state} metrics={metrics} expansions={expansions} innercity={innercity} />}
       </div>
     </div>
   );
@@ -641,10 +656,23 @@ function JourneyTab({ chains, regional, history }: { chains: ModalChain[]; regio
 
 // ─── Strategy Tab ─────────────────────────────────────────────────────────────
 
-function StrategyTab({ state, metrics }: { state: SimState | null; metrics: FinMetrics | null }) {
+function StrategyTab({ state, metrics, expansions, innercity }: {
+  state: SimState | null; metrics: FinMetrics | null;
+  expansions: ExpansionRec[]; innercity: InnercityNetwork[];
+}) {
   const fulfillment = metrics?.avgFulfillmentRate ?? 0;
-  const covGap = metrics?.latestDemand?.unservedDueToCoverage ?? 0;
+  const covGap  = metrics?.latestDemand?.unservedDueToCoverage ?? 0;
   const capGap  = metrics?.latestDemand?.unservedDueToCapacity ?? 0;
+  const compGap = (metrics?.latestDemand as any)?.unservedDueToCompetition ?? 0;
+
+  const MODE_COLORS: Record<string, string> = {
+    s_bahn: '#3b82f6', u_bahn: '#8b5cf6', tram: '#10b981',
+    gondola: '#f59e0b', local_pod_dense: '#ec4899',
+  };
+  const MODE_LABELS: Record<string, string> = {
+    s_bahn: 'S-Bahn', u_bahn: 'U-Bahn / Metro', tram: 'Tram',
+    gondola: 'Gondola / Cable', local_pod_dense: 'PODS Urban Dense',
+  };
 
   const GAPS = [
     {
@@ -701,17 +729,118 @@ function StrategyTab({ state, metrics }: { state: SimState | null; metrics: FinM
   return (
     <div>
       <h2 style={{ color: '#e2e8f0', marginTop: 0 }}>Strategy & Business Gaps</h2>
-      <div style={{ color: '#64748b', fontSize: 13, marginBottom: 20 }}>
-        Business-logic review identifying structural gaps and solution scenarios. Live metrics feed the gap severity.
-      </div>
 
+      {/* Top KPIs */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 24 }}>
         <KPI label="Demand Fulfillment" value={`${(fulfillment * 100).toFixed(1)}%`} color={fulfillment > 0.6 ? '#10b981' : '#ef4444'} sub="served vs potential" />
-        <KPI label="Unserved (coverage)" value={fmt(covGap)} color="#ef4444" sub="trips lost to no access" />
+        <KPI label="Unserved (coverage)" value={fmt(covGap)} color="#ef4444" sub="trips lost to no local access" />
         <KPI label="Unserved (capacity)" value={fmt(capGap)} color="#f59e0b" sub="trips lost to full pods" />
-        <KPI label="Avg Coverage" value={metrics?.latestDemand ? `${(metrics.latestDemand.avgCoverage * 100).toFixed(1)}%` : '—'} color="#8b5cf6" sub="across all cities" />
+        <KPI label="Lost to competition" value={fmt(compGap)} color="#8b5cf6" sub="car/plane wins on time" />
       </div>
 
+      {/* ── Network expansion recommendations ─────────────────────────────── */}
+      <div style={{ background: '#1e293b', borderRadius: 10, border: '1px solid #334155', marginBottom: 16, overflow: 'hidden' }}>
+        <div style={{ padding: '12px 18px', background: '#3b82f615', borderBottom: '1px solid #334155' }}>
+          <div style={{ fontWeight: 700, fontSize: 15, color: '#3b82f6' }}>📍 Network Expansion Recommendations</div>
+          <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>Ranked by simulation demand analysis — improve existing cities first, then expand. Cities from real-world European geography, selected by demand gap + corridor bridging + geographic coverage.</div>
+        </div>
+        <div style={{ padding: 16 }}>
+          {expansions.length === 0 ? (
+            <div style={{ color: '#64748b', fontSize: 13 }}>Run the simulation for 30+ days to generate recommendations.</div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              {expansions.slice(0, 6).map((rec, i) => (
+                <div key={rec.candidate.id} style={{ background: '#0f172a', borderRadius: 8, padding: 14, borderLeft: `3px solid ${COLORS[i % COLORS.length]}` }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                    <div style={{ fontWeight: 700, color: '#e2e8f0', fontSize: 14 }}>
+                      #{i + 1} {rec.candidate.name}
+                      <span style={{ fontSize: 11, color: '#64748b', marginLeft: 6 }}>{rec.candidate.country}</span>
+                    </div>
+                    <div style={{ fontSize: 11, color: '#10b981' }}>+{fmt(rec.estimatedDailyDemandGain)} trips/day</div>
+                  </div>
+                  <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 8, lineHeight: 1.5 }}>{rec.reason}</div>
+                  {rec.bridgesCorridors.length > 0 && (
+                    <div style={{ fontSize: 11, color: '#f59e0b' }}>🔗 Bridges: {rec.bridgesCorridors.slice(0, 2).join(' · ')}</div>
+                  )}
+                  {rec.suggestedRoutes.length > 0 && (
+                    <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>
+                      Suggested: {rec.suggestedRoutes.slice(0, 2).map(r => `→${r.toCity}`).join(' ')}
+                    </div>
+                  )}
+                  <div style={{ marginTop: 6, fontSize: 11, color: '#475569' }}>
+                    Pop: {(rec.candidate.population / 1_000_000).toFixed(2)}M · Score: {rec.score.toFixed(1)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Innercity network status ──────────────────────────────────────── */}
+      <div style={{ background: '#1e293b', borderRadius: 10, border: '1px solid #334155', marginBottom: 16, overflow: 'hidden' }}>
+        <div style={{ padding: '12px 18px', background: '#10b98115', borderBottom: '1px solid #334155' }}>
+          <div style={{ fontWeight: 700, fontSize: 15, color: '#10b981' }}>🚇 Innercity Networks</div>
+          <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>S-Bahn, U-Bahn, tram, gondola and dense PODS urban lines per city. Better innercity coverage = higher hub access = more PODS demand.</div>
+        </div>
+        <div style={{ padding: 16 }}>
+          {innercity.length === 0 ? (
+            <div style={{ color: '#64748b', fontSize: 13 }}>Loading innercity data…</div>
+          ) : (
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ color: '#64748b', textAlign: 'left', borderBottom: '1px solid #334155' }}>
+                    {['City', 'Hub Coverage', 'Daily Local Trips', 'Lines', 'PODS Urban'].map(h => (
+                      <th key={h} style={{ padding: '6px 10px' }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {innercity.map(net => {
+                    const city = state?.cities.find(c => c.id === net.cityId);
+                    const podsLine = net.lines.find(l => l.mode === 'local_pod_dense');
+                    const covPct = net.combinedCoverage * 100;
+                    return (
+                      <tr key={net.cityId} style={{ borderBottom: '1px solid #0f172a' }}>
+                        <td style={{ padding: '8px 10px', fontWeight: 600, color: '#e2e8f0' }}>{city?.name ?? net.cityId}</td>
+                        <td style={{ padding: '8px 10px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <div style={{ width: 60, height: 5, background: '#334155', borderRadius: 3 }}>
+                              <div style={{ width: `${covPct}%`, height: '100%', background: `hsl(${covPct * 1.2},70%,50%)`, borderRadius: 3 }} />
+                            </div>
+                            <span style={{ color: '#10b981' }}>{covPct.toFixed(0)}%</span>
+                          </div>
+                        </td>
+                        <td style={{ padding: '8px 10px', color: '#94a3b8' }}>{(net.dailyLocalTrips / 1000).toFixed(0)}k</td>
+                        <td style={{ padding: '8px 10px' }}>
+                          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                            {net.lines.filter(l => l.operational).map(l => (
+                              <span key={l.name} style={{ padding: '1px 6px', borderRadius: 10, fontSize: 10, background: `${MODE_COLORS[l.mode] ?? '#475569'}25`, color: MODE_COLORS[l.mode] ?? '#94a3b8' }}>
+                                {MODE_LABELS[l.mode] ?? l.mode}
+                              </span>
+                            ))}
+                          </div>
+                        </td>
+                        <td style={{ padding: '8px 10px' }}>
+                          {podsLine ? (
+                            <span style={{ color: podsLine.operational ? '#10b981' : '#f59e0b', fontSize: 11 }}>
+                              {podsLine.operational ? `✓ Open (${podsLine.coverageRadiusKm}km radius)` : `Day ${podsLine.openDay}`}
+                            </span>
+                          ) : <span style={{ color: '#475569' }}>—</span>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Business gap analyses ─────────────────────────────────────────── */}
+      <div style={{ fontWeight: 700, fontSize: 14, color: '#94a3b8', marginBottom: 12, marginTop: 8 }}>Business Gap Analysis</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         {GAPS.map(g => (
           <div key={g.title} style={{ background: '#1e293b', borderRadius: 10, border: `1px solid ${sevColor(g.severity)}33`, overflow: 'hidden' }}>
