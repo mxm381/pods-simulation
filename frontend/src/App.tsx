@@ -179,10 +179,10 @@ export default function App() {
       <div style={{ padding: '24px', maxWidth: 1400, margin: '0 auto' }}>
         {tab === 'control'    && <ControlTab state={state} metrics={metrics} speed={speed} speedOptions={SPEED_OPTIONS} isRunning={isRunning} onStart={() => post('/api/simulation/start', { speed })} onStop={() => post('/api/simulation/stop')} onSpeed={handleSpeed} />}
         {tab === 'financial'  && <FinancialTab metrics={metrics} history={state?.dailyMetrics ?? []} />}
-        {tab === 'map'        && <MapTab state={state} />}
+        {tab === 'map'        && <MapTab state={state} innercity={innercity} />}
         {tab === 'operations' && <OperationsTab state={state} metrics={metrics} />}
         {tab === 'journey'    && <JourneyTab chains={chains} regional={state?.latestRegionalMetrics ?? []} history={state?.dailyMetrics ?? []} />}
-        {tab === 'strategy'   && <StrategyTab state={state} metrics={metrics} expansions={expansions} innercity={innercity} />}
+        {tab === 'strategy'   && <StrategyTab state={state} metrics={metrics} expansions={expansions} innercity={innercity} onAddCity={async (id) => { await post('/api/cities/add-expansion', { candidateId: id }); }} />}
       </div>
     </div>
   );
@@ -308,6 +308,25 @@ function FinancialTab({ metrics, history }: { metrics: FinMetrics | null; histor
         <KPI label="Revenue / Pax-km" value={m.avgRevenuePerPassengerKm != null ? `€${m.avgRevenuePerPassengerKm.toFixed(3)}` : '—'} color="#3b82f6" />
       </div>
 
+      {/* Pricing tier breakdown */}
+      <div style={{ background: '#1e293b', borderRadius: 10, padding: 16, border: '1px solid #334155', marginBottom: 16 }}>
+        <div style={{ fontWeight: 700, marginBottom: 12, color: '#94a3b8' }}>Pricing Tier Model</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+          {[
+            { label: 'Commuter Subscription', price: '€149 / month', per: '~€6.77 per trip', color: '#3b82f6', note: 'Flat monthly fee, unlimited local travel. Target: daily commuters.' },
+            { label: 'Business Per-Trip',      price: '€0.18 / km',  per: '~€50 per 280km trip', color: '#10b981', note: 'Premium rate for intercity business travel. Price-inelastic segment.' },
+            { label: 'Vacation Discount',      price: '€0.07 / km',  per: '~€29 per 420km trip', color: '#f59e0b', note: 'Discounted long-distance leisure. Volume compensates for lower margin.' },
+          ].map(t => (
+            <div key={t.label} style={{ background: '#0f172a', borderRadius: 8, padding: 14, borderLeft: `3px solid ${t.color}` }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: t.color, marginBottom: 4 }}>{t.label}</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: '#e2e8f0' }}>{t.price}</div>
+              <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>{t.per}</div>
+              <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 6, lineHeight: 1.4 }}>{t.note}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
       <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16, marginBottom: 16 }}>
         <div style={{ background: '#1e293b', borderRadius: 10, padding: 16, border: '1px solid #334155' }}>
           <div style={{ fontWeight: 700, marginBottom: 12, color: '#94a3b8' }}>Daily P&L (last 90 days)</div>
@@ -364,7 +383,62 @@ function FinancialTab({ metrics, history }: { metrics: FinMetrics | null; histor
 
 // ─── Map Tab ──────────────────────────────────────────────────────────────────
 
-function MapTab({ state }: { state: SimState | null }) {
+const MODE_COLORS: Record<string, string> = {
+  s_bahn: '#3b82f6', u_bahn: '#8b5cf6', tram: '#10b981',
+  gondola: '#f59e0b', local_pod_dense: '#ec4899',
+};
+const MODE_LABELS: Record<string, string> = {
+  s_bahn: 'S-Bahn', u_bahn: 'U-Bahn', tram: 'Tram',
+  gondola: 'Gondola', local_pod_dense: 'PODS Dense',
+};
+
+function InnercitySchematic({ net, cityName }: { net: InnercityNetwork; cityName: string }) {
+  const lines = net.lines;
+  const n = lines.length;
+  const CX = 80, CY = 80, R = 60;
+  return (
+    <div style={{ background: '#0f172a', borderRadius: 8, padding: 10, border: '1px solid #1e293b' }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: '#e2e8f0', marginBottom: 6 }}>{cityName}</div>
+      <svg viewBox="0 0 160 160" width={140} height={140} style={{ display: 'block', margin: '0 auto' }}>
+        {/* Coverage circle */}
+        <circle cx={CX} cy={CY} r={R * net.combinedCoverage} fill="none" stroke="#334155" strokeWidth={1} strokeDasharray="3 2" />
+        {/* Line arms */}
+        {lines.map((line, i) => {
+          const angle = (i / n) * 2 * Math.PI - Math.PI / 2;
+          const maxRad = Math.max(...lines.map(l => l.coverageRadiusKm));
+          const armLen = (line.coverageRadiusKm / Math.max(maxRad, 1)) * (R - 10) + 10;
+          const ex = CX + Math.cos(angle) * armLen;
+          const ey = CY + Math.sin(angle) * armLen;
+          const col = MODE_COLORS[line.mode] ?? '#475569';
+          const opacity = line.operational ? 1 : 0.35;
+          return (
+            <g key={line.name} opacity={opacity}>
+              <line x1={CX} y1={CY} x2={ex} y2={ey} stroke={col} strokeWidth={line.operational ? 2.5 : 1.5} strokeDasharray={line.operational ? undefined : '4 3'} />
+              <circle cx={ex} cy={ey} r={4} fill={col} />
+              <text x={ex + Math.cos(angle) * 8} y={ey + Math.sin(angle) * 8 + 3} textAnchor="middle" fontSize={7} fill={col}>{MODE_LABELS[line.mode] ?? line.mode}</text>
+            </g>
+          );
+        })}
+        {/* Hub center */}
+        <circle cx={CX} cy={CY} r={7} fill="#1e293b" stroke="#3b82f6" strokeWidth={2} />
+        <text x={CX} y={CY + 3} textAnchor="middle" fontSize={7} fill="#3b82f6" fontWeight="bold">HUB</text>
+      </svg>
+      <div style={{ fontSize: 10, color: '#64748b', textAlign: 'center', marginTop: 4 }}>
+        Cov: {(net.combinedCoverage * 100).toFixed(0)}% · {(net.dailyLocalTrips / 1000).toFixed(0)}k trips/day
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3, marginTop: 6, justifyContent: 'center' }}>
+        {lines.map(l => (
+          <span key={l.name} style={{ fontSize: 9, padding: '1px 5px', borderRadius: 8, background: `${MODE_COLORS[l.mode] ?? '#475569'}25`, color: MODE_COLORS[l.mode] ?? '#94a3b8', opacity: l.operational ? 1 : 0.4 }}>
+            {l.operational ? '●' : '○'} {MODE_LABELS[l.mode] ?? l.mode}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MapTab({ state, innercity }: { state: SimState | null; innercity: InnercityNetwork[] }) {
+  const [cityMapExpanded, setCityMapExpanded] = useState(false);
   if (!state) return <div style={{ color: '#64748b', padding: 40, textAlign: 'center' }}>Loading...</div>;
 
   const routes = state.routes;
@@ -450,6 +524,27 @@ function MapTab({ state }: { state: SimState | null }) {
             })}
           </div>
         </div>
+      </div>
+
+      {/* ── Innercity city maps ────────────────────────────────────────── */}
+      <div style={{ background: '#1e293b', borderRadius: 10, border: '1px solid #334155', marginTop: 16, overflow: 'hidden' }}>
+        <div style={{ padding: '12px 18px', background: '#10b98115', borderBottom: cityMapExpanded ? '1px solid #334155' : 'none', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }} onClick={() => setCityMapExpanded(e => !e)}>
+          <div style={{ fontWeight: 700, fontSize: 14, color: '#10b981' }}>🚇 Innercity Network Maps</div>
+          <div style={{ fontSize: 12, color: '#64748b' }}>{cityMapExpanded ? '▲ collapse' : '▼ expand'}</div>
+        </div>
+        {cityMapExpanded && (
+          <div style={{ padding: 16 }}>
+            {innercity.length === 0
+              ? <div style={{ color: '#64748b', fontSize: 13 }}>No innercity data yet. Start simulation.</div>
+              : <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(170px, 1fr))', gap: 12 }}>
+                  {innercity.map(net => {
+                    const city = state.cities.find(c => c.id === net.cityId);
+                    return <InnercitySchematic key={net.cityId} net={net} cityName={city?.name ?? net.cityId} />;
+                  })}
+                </div>
+            }
+          </div>
+        )}
       </div>
 
       <div style={{ background: '#1e293b', borderRadius: 10, padding: 16, border: '1px solid #334155', marginTop: 16 }}>
@@ -656,23 +751,16 @@ function JourneyTab({ chains, regional, history }: { chains: ModalChain[]; regio
 
 // ─── Strategy Tab ─────────────────────────────────────────────────────────────
 
-function StrategyTab({ state, metrics, expansions, innercity }: {
+function StrategyTab({ state, metrics, expansions, innercity, onAddCity }: {
   state: SimState | null; metrics: FinMetrics | null;
   expansions: ExpansionRec[]; innercity: InnercityNetwork[];
+  onAddCity: (candidateId: string) => Promise<void>;
 }) {
+  const [adding, setAdding] = useState<string | null>(null);
   const fulfillment = metrics?.avgFulfillmentRate ?? 0;
   const covGap  = metrics?.latestDemand?.unservedDueToCoverage ?? 0;
   const capGap  = metrics?.latestDemand?.unservedDueToCapacity ?? 0;
   const compGap = (metrics?.latestDemand as any)?.unservedDueToCompetition ?? 0;
-
-  const MODE_COLORS: Record<string, string> = {
-    s_bahn: '#3b82f6', u_bahn: '#8b5cf6', tram: '#10b981',
-    gondola: '#f59e0b', local_pod_dense: '#ec4899',
-  };
-  const MODE_LABELS: Record<string, string> = {
-    s_bahn: 'S-Bahn', u_bahn: 'U-Bahn / Metro', tram: 'Tram',
-    gondola: 'Gondola / Cable', local_pod_dense: 'PODS Urban Dense',
-  };
 
   const GAPS = [
     {
@@ -767,8 +855,15 @@ function StrategyTab({ state, metrics, expansions, innercity }: {
                       Suggested: {rec.suggestedRoutes.slice(0, 2).map(r => `→${r.toCity}`).join(' ')}
                     </div>
                   )}
-                  <div style={{ marginTop: 6, fontSize: 11, color: '#475569' }}>
-                    Pop: {(rec.candidate.population / 1_000_000).toFixed(2)}M · Score: {rec.score.toFixed(1)}
+                  <div style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ fontSize: 11, color: '#475569' }}>Pop: {(rec.candidate.population / 1_000_000).toFixed(2)}M · Score: {rec.score.toFixed(1)}</div>
+                    <button
+                      disabled={adding === rec.candidate.id}
+                      onClick={async () => { setAdding(rec.candidate.id); await onAddCity(rec.candidate.id); setAdding(null); }}
+                      style={{ padding: '3px 10px', borderRadius: 6, border: '1px solid #3b82f6', background: adding === rec.candidate.id ? '#1e40af' : 'transparent', color: '#3b82f6', cursor: 'pointer', fontSize: 11, fontWeight: 700 }}
+                    >
+                      {adding === rec.candidate.id ? 'Adding…' : '+ Add to Network'}
+                    </button>
                   </div>
                 </div>
               ))}

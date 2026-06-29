@@ -631,6 +631,86 @@ export class PODSSimulationEngine {
     });
   }
 
+  // ─── City expansion: add top recommendation to live simulation ───────────
+
+  private tryAddNewCity(): void {
+    const recs = this.state.expansionRecommendations;
+    if (recs.length === 0) return;
+    const top = recs[0];
+    if (top.score < 4.0) return;
+
+    const c = top.candidate;
+    if (this.state.cities.some(x => x.id === c.id)) return;
+
+    this.state.cities.push({
+      id: c.id, name: c.name, lat: c.lat, lng: c.lng,
+      population: c.population, demandMultiplier: c.demandMultiplier,
+      regionId: c.regionId, isHub: c.isHub,
+    });
+    this.state.coverageByCity[c.id] = 0.20;
+
+    const region = this.state.regions.find(r => r.id === c.regionId);
+    if (region && !region.cityIds.includes(c.id)) region.cityIds.push(c.id);
+
+    const lines: InnercityLine[] = [
+      { cityId: c.id, mode: 'tram'           as InnercityMode, name: 'Local Transit', coverageRadiusKm: 8,  dailyCapacity: 80_000, operational: true,  openDay: this.state.simulationDay, investmentEur: 0 },
+      { cityId: c.id, mode: 'local_pod_dense'as InnercityMode, name: 'PODS Local',    coverageRadiusKm: 12, dailyCapacity: 30_000, operational: false, openDay: this.state.simulationDay + 90 + Math.floor(Math.random() * 120), investmentEur: 400_000_000 },
+    ];
+    this.state.innercityNetworks.push({
+      cityId: c.id, lines,
+      combinedCoverage: this.computeInnercityCoverage(lines),
+      dailyLocalTrips: 80_000 * 0.35,
+    });
+
+    // Connect to nearest hub(s) within 700 km
+    let connectTargets = this.state.cities
+      .filter(e => e.id !== c.id && e.isHub)
+      .map(e => ({ city: e, dist: this.haversine(c.lat, c.lng, e.lat, e.lng) }))
+      .filter(x => x.dist < 700)
+      .sort((a, b) => a.dist - b.dist)
+      .slice(0, 2);
+
+    if (connectTargets.length === 0) {
+      connectTargets = this.state.cities
+        .filter(e => e.id !== c.id)
+        .map(e => ({ city: e, dist: this.haversine(c.lat, c.lng, e.lat, e.lng) }))
+        .sort((a, b) => a.dist - b.dist)
+        .slice(0, 2);
+    }
+
+    connectTargets.forEach(({ city, dist }) => {
+      const openDay = this.state.simulationDay + 90 + Math.floor(Math.random() * 90);
+      this.state.routes.push({
+        id: `r-exp-${uuidv4().slice(0, 6)}`,
+        fromCityId: c.id, toCityId: city.id,
+        distanceKm: dist, maglev: dist > 150,
+        estimatedMinutes: Math.round(dist / (dist > 150 ? 450 : 120) * 60),
+        capsuleCapacity: 4, statusCode: 'planning',
+        estimatedOpenDay: openDay,
+        routeType: city.regionId !== c.regionId ? 'cross_border' : dist < 200 ? 'regional' : 'intercity',
+      });
+    });
+
+    this.addCapEx('hub_construction', 150_000_000 + c.population * 40, `New hub expansion: ${c.name}`);
+    this.state.expansionRecommendations = this.computeExpansionRecommendations();
+  }
+
+  public addCityFromExpansion(candidateId: string): { city: City; routes: Route[] } {
+    const candidate = EU_CANDIDATE_POOL.find(c => c.id === candidateId);
+    if (!candidate) throw new Error('Candidate not found in EU_CANDIDATE_POOL');
+    if (this.state.cities.some(x => x.id === candidateId)) throw new Error('City already in network');
+
+    // Force threshold override for manual addition
+    this.state.expansionRecommendations = [
+      { candidate, score: 99, reason: 'Manually added', estimatedDailyDemandGain: 0, bridgesCorridors: [], suggestedRoutes: [] },
+      ...this.state.expansionRecommendations.filter(r => r.candidate.id !== candidateId),
+    ];
+    this.tryAddNewCity();
+    const newCity = this.state.cities.find(c => c.id === candidateId)!;
+    const newRoutes = this.state.routes.filter(r => r.fromCityId === candidateId || r.toCityId === candidateId);
+    return { city: newCity, routes: newRoutes };
+  }
+
   // ─── Dynamic events ───────────────────────────────────────────────────────
 
   private generateDynamicEvents(): void {
@@ -683,6 +763,11 @@ export class PODSSimulationEngine {
 
     if (poisson(1 / 90) && this.state.dailyMetrics.length > 30) {
       this.tryProposeNewRoute();
+    }
+
+    // Every ~200 days, auto-add the top-scored expansion candidate
+    if (poisson(1 / 200) && this.state.dailyMetrics.length > 90) {
+      this.tryAddNewCity();
     }
   }
 
@@ -1007,12 +1092,19 @@ export class PODSSimulationEngine {
 
     const demand = this.buildDemand();
     const opRoutes = this.state.routes.filter(r => r.statusCode === 'operational');
-    const avgTicket = opRoutes.length > 0
-      ? opRoutes.reduce((s, r) => s + r.distanceKm * 0.10, 0) / opRoutes.length : 22;
-    const totalRevenue = demand.servedTrips * avgTicket;
-    const annualOpex   = 650_000_000 + this.state.pods.length * 65_000 + opRoutes.length * 8_000_000;
     const travelingPods = this.state.pods.filter(p => p.status === 'traveling').length;
-    const tripSplit   = this.tripSplit(opRoutes, demand.servedTrips);
+    const tripSplit = this.tripSplit(opRoutes, demand.servedTrips);
+
+    // Tiered pricing: commuter subscription, business premium, vacation discount
+    const COMMUTER_PRICE_PER_TRIP = 149 / 22;   // €149/month subscription ÷ 22 workdays
+    const BUSINESS_PRICE_PER_KM  = 0.18;         // business premium rate
+    const VACATION_PRICE_PER_KM  = 0.07;         // vacation discount rate
+    const totalRevenue =
+      tripSplit.commute  * COMMUTER_PRICE_PER_TRIP +
+      tripSplit.business * 280 * BUSINESS_PRICE_PER_KM +
+      tripSplit.vacation * 420 * VACATION_PRICE_PER_KM;
+    const avgTicket = demand.servedTrips > 0 ? totalRevenue / demand.servedTrips : 22;
+    const annualOpex = 650_000_000 + this.state.pods.length * 65_000 + opRoutes.length * 8_000_000;
     const avgDistKm = 220;
 
     return {

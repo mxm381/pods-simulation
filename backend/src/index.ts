@@ -142,6 +142,17 @@ app.get('/api/rollout', (_req: Request, res: Response) => {
   res.json(rolloutRoutes);
 });
 
+app.post('/api/cities/add-expansion', (req: Request, res: Response) => {
+  const { candidateId } = req.body;
+  if (!candidateId) return res.status(400).json({ error: 'Missing candidateId' });
+  try {
+    const result = simulation.addCityFromExpansion(candidateId);
+    res.json({ status: 'added', city: result.city, routes: result.routes });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 app.get('/api/innercity', (_req: Request, res: Response) => {
   res.json(lastState.innercityNetworks ?? []);
 });
