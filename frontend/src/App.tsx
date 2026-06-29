@@ -28,7 +28,7 @@ interface SimState {
   coverageByCity: Record<string, number>;
 }
 interface City { id: string; name: string; lat: number; lng: number; population: number; regionId: string; }
-interface Route { id: string; fromCityId: string; toCityId: string; distanceKm: number; maglev: boolean; statusCode: string; routeType: string; estimatedOpenDay?: number; }
+interface Route { id: string; fromCityId: string; toCityId: string; distanceKm: number; maglev: boolean; statusCode: string; routeType: string; estimatedOpenDay?: number; useExistingRail?: boolean; }
 interface Pod { id: string; routeId: string; status: string; currentPassengers: number; capacity: number; batteryPercentage: number; }
 interface MaintEvent { id: string; type: string; regionId: string; startDay: number; endDay: number; severity: string; description: string; demandBoostPct: number; active: boolean; }
 interface DailyMetrics {
@@ -59,17 +59,30 @@ interface ExpansionRec {
   bridgesCorridors: string[];
   suggestedRoutes: { toCity: string; timeSavingPct: number }[];
 }
-interface InnercityLine { cityId: string; mode: string; name: string; coverageRadiusKm: number; dailyCapacity: number; operational: boolean; openDay: number; }
+interface InnercityLine { cityId: string; mode: string; name: string; stops: string[]; coverageRadiusKm: number; dailyCapacity: number; operational: boolean; openDay: number; }
 interface InnercityNetwork { cityId: string; lines: InnercityLine[]; combinedCoverage: number; dailyLocalTrips: number; }
 
 // ─── Map projection ───────────────────────────────────────────────────────────
 
 const MAP_W = 800, MAP_H = 500;
-const LAT_MIN = 43.0, LAT_MAX = 57.5, LNG_MIN = -2.0, LNG_MAX = 22.5;
-function project(lat: number, lng: number) {
+
+function computeMapBounds(cities: City[]) {
+  if (cities.length === 0) return { latMin: 43, latMax: 58, lngMin: -5, lngMax: 24 };
+  const lats = cities.map(c => c.lat);
+  const lngs = cities.map(c => c.lng);
+  const latPad = 2.5, lngPad = 3.5;
   return {
-    x: Math.round(((lng - LNG_MIN) / (LNG_MAX - LNG_MIN)) * MAP_W),
-    y: Math.round(((LAT_MAX - lat) / (LAT_MAX - LAT_MIN)) * MAP_H),
+    latMin: Math.min(...lats) - latPad,
+    latMax: Math.max(...lats) + latPad,
+    lngMin: Math.min(...lngs) - lngPad,
+    lngMax: Math.max(...lngs) + lngPad,
+  };
+}
+
+function project(lat: number, lng: number, bounds: ReturnType<typeof computeMapBounds>) {
+  return {
+    x: Math.round(((lng - bounds.lngMin) / (bounds.lngMax - bounds.lngMin)) * MAP_W),
+    y: Math.round(((bounds.latMax - lat) / (bounds.latMax - bounds.latMin)) * MAP_H),
   };
 }
 
@@ -394,44 +407,78 @@ const MODE_LABELS: Record<string, string> = {
 
 function InnercitySchematic({ net, cityName }: { net: InnercityNetwork; cityName: string }) {
   const lines = net.lines;
-  const n = lines.length;
-  const CX = 80, CY = 80, R = 60;
+  const ROW_H = 28, PAD_Y = 8, PAD_X = 14, LABEL_W = 52, SVG_W = 340;
+  const svgH = lines.length * ROW_H + PAD_Y * 2;
+  const trackStart = PAD_X + LABEL_W + 4;
+  const trackEnd   = SVG_W - PAD_X;
+
   return (
-    <div style={{ background: '#0f172a', borderRadius: 8, padding: 10, border: '1px solid #1e293b' }}>
-      <div style={{ fontSize: 11, fontWeight: 700, color: '#e2e8f0', marginBottom: 6 }}>{cityName}</div>
-      <svg viewBox="0 0 160 160" width={140} height={140} style={{ display: 'block', margin: '0 auto' }}>
-        {/* Coverage circle */}
-        <circle cx={CX} cy={CY} r={R * net.combinedCoverage} fill="none" stroke="#334155" strokeWidth={1} strokeDasharray="3 2" />
-        {/* Line arms */}
+    <div style={{ background: '#0f172a', borderRadius: 8, padding: '10px 12px', border: '1px solid #1e293b' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: '#e2e8f0' }}>{cityName}</div>
+        <div style={{ fontSize: 10, color: '#64748b' }}>
+          {(net.combinedCoverage * 100).toFixed(0)}% cov · {(net.dailyLocalTrips / 1000).toFixed(0)}k trips/day
+        </div>
+      </div>
+
+      <svg viewBox={`0 0 ${SVG_W} ${svgH}`} style={{ width: '100%', display: 'block' }}>
         {lines.map((line, i) => {
-          const angle = (i / n) * 2 * Math.PI - Math.PI / 2;
-          const maxRad = Math.max(...lines.map(l => l.coverageRadiusKm));
-          const armLen = (line.coverageRadiusKm / Math.max(maxRad, 1)) * (R - 10) + 10;
-          const ex = CX + Math.cos(angle) * armLen;
-          const ey = CY + Math.sin(angle) * armLen;
-          const col = MODE_COLORS[line.mode] ?? '#475569';
-          const opacity = line.operational ? 1 : 0.35;
+          const y      = PAD_Y + i * ROW_H + ROW_H / 2;
+          const col    = MODE_COLORS[line.mode] ?? '#475569';
+          const op     = line.operational;
+          const stops  = line.stops ?? [];
+          const nStops = stops.length;
+          const stopSpacing = nStops > 1 ? (trackEnd - trackStart) / (nStops - 1) : 0;
+
           return (
-            <g key={line.name} opacity={opacity}>
-              <line x1={CX} y1={CY} x2={ex} y2={ey} stroke={col} strokeWidth={line.operational ? 2.5 : 1.5} strokeDasharray={line.operational ? undefined : '4 3'} />
-              <circle cx={ex} cy={ey} r={4} fill={col} />
-              <text x={ex + Math.cos(angle) * 8} y={ey + Math.sin(angle) * 8 + 3} textAnchor="middle" fontSize={7} fill={col}>{MODE_LABELS[line.mode] ?? line.mode}</text>
+            <g key={line.name} opacity={op ? 1 : 0.38}>
+              {/* Line name badge */}
+              <rect x={PAD_X} y={y - 8} width={LABEL_W} height={16} rx={4} fill={`${col}22`} stroke={col} strokeWidth={0.8} />
+              <text x={PAD_X + LABEL_W / 2} y={y + 4} textAnchor="middle" fontSize={8.5} fill={col} fontWeight="bold">{line.name}</text>
+
+              {/* Track */}
+              <line x1={trackStart} y1={y} x2={trackEnd} y2={y}
+                stroke={col} strokeWidth={op ? 2.5 : 1.5}
+                strokeDasharray={op ? undefined : '6 3'} />
+
+              {/* Stops */}
+              {stops.map((stop, si) => {
+                const sx = trackStart + si * stopSpacing;
+                const showLabel = nStops <= 5 || si === 0 || si === nStops - 1;
+                return (
+                  <g key={si}>
+                    <circle cx={sx} cy={y} r={nStops > 8 ? 2 : 3} fill="#0f172a" stroke={col} strokeWidth={1.5} />
+                    {showLabel && (
+                      <text x={sx} y={si % 2 === 0 ? y - 7 : y + 13} textAnchor="middle" fontSize={6.5}
+                        fill="#64748b" style={{ userSelect: 'none' }}>
+                        {stop.length > 10 ? stop.slice(0, 10) + '…' : stop}
+                      </text>
+                    )}
+                  </g>
+                );
+              })}
+
+              {!op && (
+                <text x={trackEnd + 2} y={y + 3} fontSize={7.5} fill="#475569">
+                  Day {line.openDay}
+                </text>
+              )}
             </g>
           );
         })}
-        {/* Hub center */}
-        <circle cx={CX} cy={CY} r={7} fill="#1e293b" stroke="#3b82f6" strokeWidth={2} />
-        <text x={CX} y={CY + 3} textAnchor="middle" fontSize={7} fill="#3b82f6" fontWeight="bold">HUB</text>
       </svg>
-      <div style={{ fontSize: 10, color: '#64748b', textAlign: 'center', marginTop: 4 }}>
-        Cov: {(net.combinedCoverage * 100).toFixed(0)}% · {(net.dailyLocalTrips / 1000).toFixed(0)}k trips/day
-      </div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3, marginTop: 6, justifyContent: 'center' }}>
-        {lines.map(l => (
-          <span key={l.name} style={{ fontSize: 9, padding: '1px 5px', borderRadius: 8, background: `${MODE_COLORS[l.mode] ?? '#475569'}25`, color: MODE_COLORS[l.mode] ?? '#94a3b8', opacity: l.operational ? 1 : 0.4 }}>
-            {l.operational ? '●' : '○'} {MODE_LABELS[l.mode] ?? l.mode}
-          </span>
-        ))}
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3, marginTop: 6 }}>
+        {Array.from(new Set(lines.map(l => l.mode))).map(mode => {
+          const modeLines = lines.filter(l => l.mode === mode);
+          const opCount   = modeLines.filter(l => l.operational).length;
+          const col = MODE_COLORS[mode] ?? '#475569';
+          return (
+            <span key={mode} style={{ fontSize: 9, padding: '2px 6px', borderRadius: 8, background: `${col}20`, color: col }}>
+              {MODE_LABELS[mode] ?? mode} {opCount}/{modeLines.length}
+            </span>
+          );
+        })}
       </div>
     </div>
   );
@@ -444,9 +491,10 @@ function MapTab({ state, innercity }: { state: SimState | null; innercity: Inner
   const routes = state.routes;
   const cities = state.cities;
   const coverage = state.coverageByCity;
+  const bounds = computeMapBounds(cities);
 
   const colorForRoute = (r: Route) => {
-    if (r.statusCode === 'operational') return r.maglev ? '#3b82f6' : '#10b981';
+    if (r.statusCode === 'operational') return r.useExistingRail ? '#10b981' : r.maglev ? '#3b82f6' : '#10b981';
     if (r.statusCode === 'construction') return '#f59e0b';
     return '#475569';
   };
@@ -461,8 +509,8 @@ function MapTab({ state, innercity }: { state: SimState | null; innercity: Inner
               const from = cities.find(c => c.id === r.fromCityId);
               const to   = cities.find(c => c.id === r.toCityId);
               if (!from || !to) return null;
-              const p1 = project(from.lat, from.lng);
-              const p2 = project(to.lat,   to.lng);
+              const p1 = project(from.lat, from.lng, bounds);
+              const p2 = project(to.lat,   to.lng, bounds);
               return (
                 <line key={r.id} x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y}
                   stroke={colorForRoute(r)} strokeWidth={r.maglev ? 2.5 : 1.5}
@@ -474,7 +522,7 @@ function MapTab({ state, innercity }: { state: SimState | null; innercity: Inner
               );
             })}
             {cities.map(c => {
-              const p = project(c.lat, c.lng);
+              const p = project(c.lat, c.lng, bounds);
               const cov = coverage[c.id] ?? 0;
               const r  = 6 + cov * 12;
               return (
@@ -493,8 +541,8 @@ function MapTab({ state, innercity }: { state: SimState | null; innercity: Inner
           <div style={{ background: '#1e293b', borderRadius: 10, padding: 16, border: '1px solid #334155' }}>
             <div style={{ fontWeight: 700, marginBottom: 12, color: '#94a3b8' }}>Legend</div>
             {[
-              { col: '#3b82f6', dash: false, label: 'Maglev (operational)' },
-              { col: '#10b981', dash: false, label: 'Standard (operational)' },
+              { col: '#3b82f6', dash: false, label: 'New Maglev (operational)' },
+              { col: '#10b981', dash: false, label: 'Existing Rail / PODS (operational)' },
               { col: '#f59e0b', dash: true,  label: 'Under construction' },
               { col: '#475569', dash: true,  label: 'Planning' },
             ].map(l => (
@@ -553,7 +601,7 @@ function MapTab({ state, innercity }: { state: SimState | null; innercity: Inner
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
             <thead>
               <tr style={{ color: '#64748b', textAlign: 'left' }}>
-                {['Route','Type','Distance','Maglev','Status','Open day'].map(h => (
+                {['Route','Distance','Infra','Status','Open (sim day)'].map(h => (
                   <th key={h} style={{ padding: '6px 10px', borderBottom: '1px solid #334155' }}>{h}</th>
                 ))}
               </tr>
@@ -563,14 +611,14 @@ function MapTab({ state, innercity }: { state: SimState | null; innercity: Inner
                 const from = cities.find(c => c.id === r.fromCityId);
                 const to   = cities.find(c => c.id === r.toCityId);
                 const col  = r.statusCode === 'operational' ? '#10b981' : r.statusCode === 'construction' ? '#f59e0b' : r.statusCode === 'planning' ? '#3b82f6' : '#ef4444';
+                const infra = r.useExistingRail ? '🚆 Existing Rail' : r.maglev ? '⚡ New Maglev' : '🛤 Track Upgrade';
                 return (
                   <tr key={r.id} style={{ borderBottom: '1px solid #0f172a' }}>
-                    <td style={{ padding: '6px 10px' }}>{from?.name} → {to?.name}</td>
-                    <td style={{ padding: '6px 10px', color: '#94a3b8' }}>{r.routeType}</td>
-                    <td style={{ padding: '6px 10px' }}>{r.distanceKm.toFixed(0)} km</td>
-                    <td style={{ padding: '6px 10px' }}>{r.maglev ? '✓' : '—'}</td>
+                    <td style={{ padding: '6px 10px' }}>{from?.name} → {to?.name} <span style={{ color: '#475569', fontSize: 10 }}>{r.distanceKm.toFixed(0)}km</span></td>
+                    <td style={{ padding: '6px 10px', color: '#94a3b8' }}>{r.distanceKm.toFixed(0)} km</td>
+                    <td style={{ padding: '6px 10px', fontSize: 11 }}>{infra}</td>
                     <td style={{ padding: '6px 10px', color: col, textTransform: 'capitalize' }}>{r.statusCode}</td>
-                    <td style={{ padding: '6px 10px', color: '#94a3b8' }}>{r.estimatedOpenDay ? `Day ${r.estimatedOpenDay}` : '—'}</td>
+                    <td style={{ padding: '6px 10px', color: '#94a3b8' }}>{r.estimatedOpenDay ? `Day ${r.estimatedOpenDay} (~${(r.estimatedOpenDay/365).toFixed(1)}yr)` : '—'}</td>
                   </tr>
                 );
               })}

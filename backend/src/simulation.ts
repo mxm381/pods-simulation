@@ -81,7 +81,9 @@ export type InnercityMode = 's_bahn' | 'u_bahn' | 'tram' | 'gondola' | 'local_po
 
 export interface InnercityLine {
   cityId: string; mode: InnercityMode;
-  name: string; coverageRadiusKm: number; dailyCapacity: number;
+  name: string;
+  stops: string[];           // key station names along this line
+  coverageRadiusKm: number; dailyCapacity: number;
   operational: boolean; openDay: number; investmentEur: number;
 }
 
@@ -105,6 +107,7 @@ export interface Route {
   capsuleCapacity: number;
   statusCode: 'planning' | 'construction' | 'operational' | 'paused';
   operationalSince?: Date; estimatedOpenDay?: number; routeType: RouteType;
+  useExistingRail?: boolean;  // true = adapting existing tracks/infrastructure
 }
 
 export interface Pod {
@@ -300,17 +303,18 @@ export class PODSSimulationEngine {
     ];
 
     const mkRoute = (id: string, f: string, t: string, km: number, maglev: boolean, mins: number,
-                     status: Route['statusCode'], type: RouteType, openDay?: number): Route => ({
+                     status: Route['statusCode'], type: RouteType, openDay?: number, existingRail = false): Route => ({
       id, fromCityId: f, toCityId: t, distanceKm: km, maglev, estimatedMinutes: mins,
       capsuleCapacity: 4, statusCode: status,
       operationalSince: status === 'operational' ? new Date('2034-01-01') : undefined,
-      estimatedOpenDay: openDay, routeType: type,
+      estimatedOpenDay: openDay, routeType: type, useExistingRail: existingRail,
     });
 
     // Route design principle: spine network only. No redundant direct routes where
     // a 1-hop path is nearly as fast. New direct routes only when they save ≥20% time.
+    // Existing rail corridors are adapted (fast, cheap). New maglev only for key long-distance.
     this.state.routes = [
-      // ── Core maglev spine (operational) ────────────────────────────────────
+      // ── Core maglev spine (operational since 2034) ─────────────────────────
       mkRoute('r1',  'berlin',    'hamburg',    290, true,  38, 'operational', 'intercity'),
       mkRoute('r2',  'berlin',    'frankfurt',  551, true,  73, 'operational', 'intercity'),
       mkRoute('r3',  'frankfurt', 'munich',     391, true,  52, 'operational', 'intercity'),
@@ -326,23 +330,28 @@ export class PODSSimulationEngine {
       mkRoute('r13', 'brussels',  'amsterdam',  200, true,  27, 'operational', 'cross_border'),
       mkRoute('r14', 'paris',     'lyon',       465, true,  62, 'operational', 'regional'),
       mkRoute('r15', 'frankfurt', 'stuttgart',  210, true,  28, 'operational', 'regional'),
-      // ── Standard fallback routes (operational) ─────────────────────────────
-      mkRoute('r16', 'zurich',    'basel',       85, false,  42, 'operational', 'regional'),
-      mkRoute('r17', 'zurich',    'geneva',     280, false, 140, 'operational', 'regional'),
-      // ── Near-term construction ──────────────────────────────────────────────
-      mkRoute('r18', 'paris',     'amsterdam',  510, true,  68, 'construction', 'cross_border', 60),
-      mkRoute('r19', 'munich',    'prague',     370, true,  49, 'construction', 'cross_border', 90),
-      mkRoute('r20', 'berlin',    'copenhagen', 430, true,  57, 'construction', 'cross_border', 120),
-      mkRoute('r21', 'frankfurt', 'brussels',   280, true,  37, 'construction', 'cross_border', 80),
-      // ── Planning ────────────────────────────────────────────────────────────
-      mkRoute('r22', 'hamburg',   'copenhagen', 310, true,  41, 'planning', 'cross_border', 200),
-      mkRoute('r23', 'vienna',    'prague',     310, true,  41, 'planning', 'cross_border', 240),
-      mkRoute('r24', 'berlin',    'warsaw',     580, true,  77, 'planning', 'cross_border', 300),
-      mkRoute('r25', 'lyon',      'geneva',     150, true,  20, 'planning', 'regional',     180),
-      mkRoute('r26', 'dusseldorf','cologne',     45, false,  22, 'planning', 'local',        120),
-      mkRoute('r27', 'stuttgart', 'munich',     230, true,  31, 'planning', 'regional',     270),
-      mkRoute('r28', 'amsterdam', 'brussels',   200, true,  27, 'planning', 'cross_border', 150),
-      mkRoute('r29', 'lyon',      'zurich',     300, true,  40, 'planning', 'cross_border', 320),
+      // ── Existing-rail PODS integration (operational) ────────────────────────
+      mkRoute('r16', 'zurich',    'basel',       85, false,  42, 'operational', 'regional', undefined, true),
+      mkRoute('r17', 'zurich',    'geneva',     280, false, 140, 'operational', 'regional', undefined, true),
+      // ── New maglev under construction (realistic multi-year timelines) ──────
+      // Paris-Amsterdam 510km: 6 year build
+      mkRoute('r18', 'paris',     'amsterdam',  510, true,  68, 'construction', 'cross_border', 2190),
+      // Munich-Prague 370km: 4 year build
+      mkRoute('r19', 'munich',    'prague',     370, true,  49, 'construction', 'cross_border', 1460),
+      // Berlin-Copenhagen 430km: 5 year build
+      mkRoute('r20', 'berlin',    'copenhagen', 430, true,  57, 'construction', 'cross_border', 1825),
+      // Frankfurt-Brussels 280km: 3 year build
+      mkRoute('r21', 'frankfurt', 'brussels',   280, true,  37, 'construction', 'cross_border', 1095),
+      // ── Planning (longer-horizon new maglev) ────────────────────────────────
+      mkRoute('r22', 'hamburg',   'copenhagen', 310, true,  41, 'planning', 'cross_border', 1460),
+      mkRoute('r23', 'vienna',    'prague',     310, true,  41, 'planning', 'cross_border', 1460),
+      mkRoute('r24', 'berlin',    'warsaw',     580, true,  77, 'planning', 'cross_border', 2190),
+      mkRoute('r25', 'lyon',      'geneva',     150, true,  20, 'planning', 'regional',      730),
+      // Existing rail: Düsseldorf-Cologne (DB upgrade) — 6 months
+      mkRoute('r26', 'dusseldorf','cologne',     45, false,  22, 'planning', 'local',         200, true),
+      mkRoute('r27', 'stuttgart', 'munich',     230, true,  31, 'planning', 'regional',     1095),
+      mkRoute('r28', 'amsterdam', 'brussels',   200, true,  27, 'planning', 'cross_border',  730),
+      mkRoute('r29', 'lyon',      'zurich',     300, true,  40, 'planning', 'cross_border', 1095),
     ];
 
     // Coverage: hub cities 68%, non-hub connected 55%, unconnected 18%
@@ -653,8 +662,9 @@ export class PODSSimulationEngine {
     if (region && !region.cityIds.includes(c.id)) region.cityIds.push(c.id);
 
     const lines: InnercityLine[] = [
-      { cityId: c.id, mode: 'tram'           as InnercityMode, name: 'Local Transit', coverageRadiusKm: 8,  dailyCapacity: 80_000, operational: true,  openDay: this.state.simulationDay, investmentEur: 0 },
-      { cityId: c.id, mode: 'local_pod_dense'as InnercityMode, name: 'PODS Local',    coverageRadiusKm: 12, dailyCapacity: 30_000, operational: false, openDay: this.state.simulationDay + 90 + Math.floor(Math.random() * 120), investmentEur: 400_000_000 },
+      { cityId: c.id, mode: 'tram' as InnercityMode, name: 'Tram A', stops: ['North Terminal', 'City Centre', 'South Terminal'], coverageRadiusKm: 8, dailyCapacity: 80_000, operational: true, openDay: this.state.simulationDay, investmentEur: 0 },
+      { cityId: c.id, mode: 'tram' as InnercityMode, name: 'Tram B', stops: ['East','City Centre','West Station'], coverageRadiusKm: 7, dailyCapacity: 60_000, operational: true, openDay: this.state.simulationDay, investmentEur: 0 },
+      { cityId: c.id, mode: 'local_pod_dense' as InnercityMode, name: 'PODS Urban', stops: ['Hbf', 'Centre', 'Ring', 'Airport'], coverageRadiusKm: 15, dailyCapacity: 40_000, operational: false, openDay: this.state.simulationDay + 90 + Math.floor(Math.random() * 120), investmentEur: 400_000_000 },
     ];
     this.state.innercityNetworks.push({
       cityId: c.id, lines,
@@ -679,12 +689,16 @@ export class PODSSimulationEngine {
     }
 
     connectTargets.forEach(({ city, dist }) => {
-      const openDay = this.state.simulationDay + 90 + Math.floor(Math.random() * 90);
+      const isMaglev = dist > 150;
+      const buildTime = isMaglev
+        ? (dist < 300 ? 1095 : dist < 500 ? 1460 : 1825) + Math.floor(Math.random() * 365)
+        : Math.min(365, 90 + Math.round(dist * 1.5)) + Math.floor(Math.random() * 90);
+      const openDay = this.state.simulationDay + buildTime;
       this.state.routes.push({
         id: `r-exp-${uuidv4().slice(0, 6)}`,
         fromCityId: c.id, toCityId: city.id,
-        distanceKm: dist, maglev: dist > 150,
-        estimatedMinutes: Math.round(dist / (dist > 150 ? 450 : 120) * 60),
+        distanceKm: dist, maglev: isMaglev, useExistingRail: !isMaglev,
+        estimatedMinutes: Math.round(dist / (isMaglev ? 450 : 120) * 60),
         capsuleCapacity: 4, statusCode: 'planning',
         estimatedOpenDay: openDay,
         routeType: city.regionId !== c.regionId ? 'cross_border' : dist < 200 ? 'regional' : 'intercity',
@@ -808,12 +822,17 @@ export class PODSSimulationEngine {
     candidates.sort((x, y) => y.saving - x.saving);
     const best = candidates[0];
     const dist = this.haversine(best.a.lat, best.a.lng, best.b.lat, best.b.lng);
-    const openDay = this.state.simulationDay + 60 + Math.floor(Math.random() * 60);
+    const isMaglev = dist > 150;
+    // Realistic build timeline: existing rail integration vs new maglev
+    const buildTime = isMaglev
+      ? (dist < 300 ? 1095 : dist < 500 ? 1460 : 1825) + Math.floor(Math.random() * 365)
+      : (dist < 150 ? 180 : 365) + Math.floor(Math.random() * 180);
+    const openDay = this.state.simulationDay + buildTime;
     const type: RouteType = best.a.regionId !== best.b.regionId ? 'cross_border' : dist < 200 ? 'regional' : 'intercity';
     this.state.routes.push({
       id: `r-dyn-${uuidv4().slice(0, 6)}`,
       fromCityId: best.a.id, toCityId: best.b.id,
-      distanceKm: dist, maglev: dist > 150,
+      distanceKm: dist, maglev: isMaglev, useExistingRail: !isMaglev,
       estimatedMinutes: best.directMinutes,
       capsuleCapacity: 4, statusCode: 'planning',
       estimatedOpenDay: openDay, routeType: type,
@@ -860,12 +879,38 @@ export class PODSSimulationEngine {
 
   // ─── Rollout ───────────────────────────────────────────────────────────────
 
+  // Returns construction phase duration in days, based on whether we're
+  // adapting existing rail or building new maglev infrastructure.
+  private constructionDuration(route: Route): number {
+    if (route.useExistingRail || !route.maglev) {
+      // Adapting existing tracks: integrate PODS capsules onto existing network
+      if (route.distanceKm < 60)  return 90;    // 3 months: station integration only
+      if (route.distanceKm < 150) return 180;   // 6 months
+      if (route.distanceKm < 400) return 365;   // 1 year
+      return 730;                               // 2 years for long existing rail upgrades
+    } else {
+      // New maglev / hyperloop: civil engineering from scratch
+      if (route.distanceKm < 150) return 730;   // 2 years
+      if (route.distanceKm < 300) return 1095;  // 3 years
+      if (route.distanceKm < 500) return 1460;  // 4 years
+      if (route.distanceKm < 700) return 1825;  // 5 years
+      return 2190;                             // 6 years (600km+ maglev megaproject)
+    }
+  }
+
   private processRollout(): void {
     this.state.routes.forEach(r => {
-      if (r.statusCode === 'planning' && r.estimatedOpenDay && this.state.simulationDay >= r.estimatedOpenDay - 30) {
-        r.statusCode = 'construction';
-        const cost = r.routeType === 'cross_border' ? 900_000_000 : r.routeType === 'intercity' ? 700_000_000 : 300_000_000;
-        this.addCapEx('route_construction', cost, `Construction start: ${r.fromCityId}→${r.toCityId}`, r.id);
+      if (r.statusCode === 'planning' && r.estimatedOpenDay) {
+        const constrDays = this.constructionDuration(r);
+        if (this.state.simulationDay >= r.estimatedOpenDay - constrDays) {
+          r.statusCode = 'construction';
+          const cost = r.useExistingRail
+            ? 30_000_000 + r.distanceKm * 400_000           // existing rail PODS integration: cheap
+            : r.distanceKm > 400
+              ? 1_200_000_000 * (r.distanceKm / 400)        // major new maglev corridor
+              : 700_000_000 * (r.distanceKm / 300);         // shorter new maglev
+          this.addCapEx('route_construction', cost, `Construction start: ${r.fromCityId}→${r.toCityId}`, r.id);
+        }
       }
       if (r.statusCode === 'construction' && r.estimatedOpenDay && this.state.simulationDay >= r.estimatedOpenDay) {
         r.statusCode = 'operational';
@@ -887,60 +932,195 @@ export class PODSSimulationEngine {
   }
 
   // ─── Innercity network initialisation ────────────────────────────────────
-  // Each network city gets an initial set of innercity lines reflecting real-world
-  // infrastructure maturity. Lines unlock over time via investment events.
+  // Realistic multi-line networks per city. Each line has actual station names.
+  // PODS integrates INTO existing networks — connecting to the whole network, not
+  // building parallel one-line stubs. New PODS urban lines unlock over time.
 
   private initInnercityNetworks(): void {
+    const L = (cityId: string, mode: InnercityMode, name: string, stops: string[],
+               radKm: number, cap: number, op: boolean, day: number, inv: number): InnercityLine =>
+      ({ cityId, mode, name, stops, coverageRadiusKm: radKm, dailyCapacity: cap, operational: op, openDay: day, investmentEur: inv });
+
     const cityLines: Record<string, InnercityLine[]> = {
-      berlin:     [
-        { cityId: 'berlin', mode: 's_bahn',        name: 'S-Bahn Ring',        coverageRadiusKm: 25, dailyCapacity: 800_000, operational: true,  openDay: 0,   investmentEur: 0 },
-        { cityId: 'berlin', mode: 'u_bahn',         name: 'U-Bahn Core',        coverageRadiusKm: 15, dailyCapacity: 600_000, operational: true,  openDay: 0,   investmentEur: 0 },
-        { cityId: 'berlin', mode: 'local_pod_dense', name: 'PODS Urban Mesh',    coverageRadiusKm: 30, dailyCapacity: 120_000, operational: true,  openDay: 0,   investmentEur: 2_000_000_000 },
-        { cityId: 'berlin', mode: 'tram',            name: 'Tram East',          coverageRadiusKm: 10, dailyCapacity: 200_000, operational: true,  openDay: 0,   investmentEur: 0 },
+      berlin: [
+        L('berlin','s_bahn','S1','Oranienburg · Gesundbrunnen · Hbf · Potsdamer Pl · Südkreuz · Blankenfelde'.split(' · '),45,320_000,true,0,0),
+        L('berlin','s_bahn','S2','Bernau · Pankow · Alexanderplatz · Hbf · Südkreuz · Teltow'.split(' · '),40,280_000,true,0,0),
+        L('berlin','s_bahn','S3','Erkner · Ostbahnhof · Alexanderplatz · Hbf · Zoo · Spandau'.split(' · '),42,260_000,true,0,0),
+        L('berlin','s_bahn','S5','Strausberg · Lichtenberg · Ostbahnhof · Hbf · Zoo · Spandau'.split(' · '),38,240_000,true,0,0),
+        L('berlin','s_bahn','S7','Ahrensfelde · Ostkreuz · Alexanderplatz · Zoo · Charlottenburg · Potsdam'.split(' · '),50,300_000,true,0,0),
+        L('berlin','u_bahn','U2','Pankow · Prenzlauer Berg · Alexanderplatz · Potsdamer Pl · Zoo · Ruhleben'.split(' · '),18,220_000,true,0,0),
+        L('berlin','u_bahn','U5','Hönow · Lichtenberg · Frankfurter Allee · Alexanderplatz · Hbf · Bundestag'.split(' · '),22,200_000,true,0,0),
+        L('berlin','u_bahn','U6','Tegel · Wedding · Friedrichstr · Kochstr · Tempelhof · Alt-Mariendorf'.split(' · '),20,190_000,true,0,0),
+        L('berlin','u_bahn','U7','Spandau · Jungfernheide · Hermannplatz · Neukölln · Rudow'.split(' · '),25,230_000,true,0,0),
+        L('berlin','u_bahn','U8','Wittenau · Pankow · Bernauer Str · Alexanderplatz · Hermannstr'.split(' · '),20,180_000,true,0,0),
+        L('berlin','tram','M1','Schillerstr · Prenzlauer · Hackescher Markt · Friedrichstr · Am Kupfergraben'.split(' · '),8,60_000,true,0,0),
+        L('berlin','tram','M10','Nordbahnhof · Prenzlauer Allee · Frankfurter Tor · Warschauer'.split(' · '),10,80_000,true,0,0),
+        L('berlin','local_pod_dense','PODS Ring','Gesundbrunnen · Hbf · Alexanderplatz · Südkreuz · Ostkreuz · Westkreuz'.split(' · '),30,120_000,true,0,2_000_000_000),
+        L('berlin','local_pod_dense','PODS Radial','Hbf · Spandau · Charlottenburg · Steglitz · Tempelhof'.split(' · '),20,80_000,false,200,800_000_000),
       ],
-      munich:     [
-        { cityId: 'munich', mode: 's_bahn',         name: 'S-Bahn Star',        coverageRadiusKm: 40, dailyCapacity: 900_000, operational: true,  openDay: 0,   investmentEur: 0 },
-        { cityId: 'munich', mode: 'u_bahn',          name: 'U-Bahn Network',     coverageRadiusKm: 20, dailyCapacity: 500_000, operational: true,  openDay: 0,   investmentEur: 0 },
-        { cityId: 'munich', mode: 'local_pod_dense', name: 'PODS Urban Mesh',    coverageRadiusKm: 35, dailyCapacity: 100_000, operational: true,  openDay: 0,   investmentEur: 1_800_000_000 },
+      munich: [
+        L('munich','s_bahn','S1','Freising/Flughafen · Garching · Hbf · Pasing · Herrsching'.split(' · '),40,280_000,true,0,0),
+        L('munich','s_bahn','S2','Petershausen · Dachau · Hbf · Ost · Erding'.split(' · '),50,220_000,true,0,0),
+        L('munich','s_bahn','S3','Mammendorf · Pasing · Hbf · Ostbahnhof · Holzkirchen'.split(' · '),45,240_000,true,0,0),
+        L('munich','s_bahn','S4','Geltendorf · Pasing · Hbf · Ost · Ebersberg'.split(' · '),55,200_000,true,0,0),
+        L('munich','s_bahn','S6','Tutzing · Starnberg · Pasing · Hbf · Grafing'.split(' · '),48,210_000,true,0,0),
+        L('munich','s_bahn','S8','Herrsching · Hbf · Ostbahnhof · Flughafen'.split(' · '),42,190_000,true,0,0),
+        L('munich','u_bahn','U1/U2','Messestadt · Ost · Marienplatz · Hbf · Olympiapark'.split(' · '),18,200_000,true,0,0),
+        L('munich','u_bahn','U3/U6','Moosach · Scheidplatz · Odeonsplatz · Marienplatz · Sendlinger · Forstenried'.split(' · '),20,220_000,true,0,0),
+        L('munich','u_bahn','U4/U5','Arabellapark · Odeonsplatz · Hbf · Laimer Platz · Westendstr'.split(' · '),16,180_000,true,0,0),
+        L('munich','local_pod_dense','PODS City','Hbf · Marienplatz · Odeonspl · Ost · Pasing'.split(' · '),35,100_000,true,0,1_800_000_000),
+        L('munich','local_pod_dense','PODS Ring','Messestadt · Isartor · Sendlinger · Scheidpl · Ost · Airport'.split(' · '),28,70_000,false,250,1_000_000_000),
       ],
-      frankfurt:  [
-        { cityId: 'frankfurt', mode: 's_bahn',       name: 'S-Bahn RMV',        coverageRadiusKm: 45, dailyCapacity: 600_000, operational: true,  openDay: 0,   investmentEur: 0 },
-        { cityId: 'frankfurt', mode: 'u_bahn',        name: 'U-Bahn',            coverageRadiusKm: 12, dailyCapacity: 250_000, operational: true,  openDay: 0,   investmentEur: 0 },
-        { cityId: 'frankfurt', mode: 'local_pod_dense', name: 'PODS City Hub',   coverageRadiusKm: 30, dailyCapacity: 80_000,  operational: false, openDay: 200, investmentEur: 1_200_000_000 },
+      frankfurt: [
+        L('frankfurt','s_bahn','S1/S2/S3','Rödelheim · Hauptwache · Hbf · Langen · Darmstadt'.split(' · '),45,400_000,true,0,0),
+        L('frankfurt','s_bahn','S5/S6','Friedberg · Bad Vilbel · Konstablerwache · Hbf · Diedenbergen'.split(' · '),42,280_000,true,0,0),
+        L('frankfurt','s_bahn','S8/S9','Wiesbaden · Mainz · Hbf · Konstablerwache · Hanau'.split(' · '),50,320_000,true,0,0),
+        L('frankfurt','u_bahn','U1-U3','Hausen · Hauptwache · Dom · Sachsenhausen · Südbahnhof'.split(' · '),12,180_000,true,0,0),
+        L('frankfurt','u_bahn','U4/U5','Seckbach · Konstablerwache · Dom · Hbf · Bockenheim'.split(' · '),14,160_000,true,0,0),
+        L('frankfurt','u_bahn','U6/U7','Heerstraße · Eschenheimer · Dom/Römer · Sachsenhausen · Uni'.split(' · '),13,140_000,true,0,0),
+        L('frankfurt','tram','12/14/15','Schwanheim · Sachsenhausen · Hauptwache · Bornheim · Fechenheim'.split(' · '),10,100_000,true,0,0),
+        L('frankfurt','local_pod_dense','PODS Hub','Hbf · Messe · Hauptwache · Sachsenhausen · Airport'.split(' · '),30,80_000,false,200,1_200_000_000),
       ],
-      hamburg:    [
-        { cityId: 'hamburg', mode: 's_bahn',          name: 'S-Bahn HVV',       coverageRadiusKm: 30, dailyCapacity: 700_000, operational: true,  openDay: 0,   investmentEur: 0 },
-        { cityId: 'hamburg', mode: 'u_bahn',           name: 'U-Bahn',           coverageRadiusKm: 18, dailyCapacity: 350_000, operational: true,  openDay: 0,   investmentEur: 0 },
-        { cityId: 'hamburg', mode: 'local_pod_dense',  name: 'PODS Port Loop',   coverageRadiusKm: 28, dailyCapacity: 90_000,  operational: false, openDay: 180, investmentEur: 1_400_000_000 },
+      hamburg: [
+        L('hamburg','s_bahn','S1','Airport · Ohlsdorf · Dammtor · Hbf · Altona · Blankenese'.split(' · '),30,280_000,true,0,0),
+        L('hamburg','s_bahn','S2/S21','Bergedorf · Hbf · Dammtor · Altona · Pinneberg'.split(' · '),35,320_000,true,0,0),
+        L('hamburg','s_bahn','S3','Stade · Harburg · Hbf · Berliner Tor · Neugraben'.split(' · '),40,260_000,true,0,0),
+        L('hamburg','u_bahn','U1','Norderstedt · Klosterstern · Hbf · Wandsbek · Großhansdorf'.split(' · '),22,200_000,true,0,0),
+        L('hamburg','u_bahn','U2/U4','Niendorf · Berliner Tor · HafenCity · Billstedt'.split(' · '),18,180_000,true,0,0),
+        L('hamburg','u_bahn','U3','Barmbek · Borgweg · Hauptbahnhof · St.Pauli · Wandsbek-G.'.split(' · '),16,160_000,true,0,0),
+        L('hamburg','local_pod_dense','PODS Hafen','Landungsbrücken · HafenCity · Speicherstadt · Elbphilh. · Airport'.split(' · '),28,90_000,false,180,1_400_000_000),
       ],
-      paris:      [
-        { cityId: 'paris', mode: 's_bahn',             name: 'RER Network',      coverageRadiusKm: 60, dailyCapacity: 3_000_000, operational: true, openDay: 0,  investmentEur: 0 },
-        { cityId: 'paris', mode: 'u_bahn',              name: 'Métro',            coverageRadiusKm: 20, dailyCapacity: 4_500_000, operational: true, openDay: 0,  investmentEur: 0 },
-        { cityId: 'paris', mode: 'local_pod_dense',     name: 'PODS Grand Paris', coverageRadiusKm: 50, dailyCapacity: 200_000, operational: false, openDay: 300, investmentEur: 3_500_000_000 },
+      paris: [
+        L('paris','s_bahn','RER A','Cergy · La Défense · Châtelet · Vincennes · Marne-la-Vallée'.split(' · '),60,1_200_000,true,0,0),
+        L('paris','s_bahn','RER B','CDG Airport · Gare du Nord · Châtelet · Luxembourg · Massy'.split(' · '),55,980_000,true,0,0),
+        L('paris','s_bahn','RER C','Versailles · Austerlitz · Châtelet · St-Lazare · Pontoise'.split(' · '),50,800_000,true,0,0),
+        L('paris','s_bahn','RER D/E','Villiers · Châtelet · Gare de Lyon · Orly · Corbeil'.split(' · '),45,900_000,true,0,0),
+        L('paris','u_bahn','M1','La Défense · Étoile · Châtelet · Bastille · Vincennes'.split(' · '),12,800_000,true,0,0),
+        L('paris','u_bahn','M2/M5','Porte Dauphine · Étoile · Opéra · République · Nation'.split(' · '),10,600_000,true,0,0),
+        L('paris','u_bahn','M4/M6','Montrouge · Montparnasse · St-Michel · Gare du Nord · Clignancourt'.split(' · '),11,700_000,true,0,0),
+        L('paris','u_bahn','M13/M14','St-Denis · Gare du Nord · Châtelet · Montparnasse · Olympiades'.split(' · '),14,750_000,true,0,0),
+        L('paris','tram','T1/T2/T3','Asnières · La Défense · Issy · Villejuif · Bry-sur-Marne'.split(' · '),18,400_000,true,0,0),
+        L('paris','local_pod_dense','PODS Grand Paris','CDG · La Défense · Châtelet · Orly · Versailles'.split(' · '),50,200_000,false,300,3_500_000_000),
       ],
-      amsterdam:  [
-        { cityId: 'amsterdam', mode: 'tram',            name: 'GVB Tram',         coverageRadiusKm: 12, dailyCapacity: 300_000, operational: true, openDay: 0,   investmentEur: 0 },
-        { cityId: 'amsterdam', mode: 'u_bahn',           name: 'Metro',            coverageRadiusKm: 15, dailyCapacity: 200_000, operational: true, openDay: 0,   investmentEur: 0 },
-        { cityId: 'amsterdam', mode: 'local_pod_dense',  name: 'PODS Canal Ring',  coverageRadiusKm: 18, dailyCapacity: 60_000,  operational: false, openDay: 250, investmentEur: 900_000_000 },
+      amsterdam: [
+        L('amsterdam','tram','1/2/5','Centraal · Dam · Spui · Museumplein · Nieuw West'.split(' · '),8,180_000,true,0,0),
+        L('amsterdam','tram','3/12/19','Centraal · Waterlooplein · Albert Cuyp · Amstelstation'.split(' · '),10,150_000,true,0,0),
+        L('amsterdam','tram','7/17/24','Sloterdijk · Jordaan · Centraal · Oost · Diemen'.split(' · '),12,160_000,true,0,0),
+        L('amsterdam','u_bahn','M50/M52','Noord · Centraal · Rokin · Station Zuid · Amstel'.split(' · '),15,220_000,true,0,0),
+        L('amsterdam','u_bahn','M53/M54','Isolatorweg · Nieuw-West · RAI · Duivendrecht · Gaasperplas'.split(' · '),18,180_000,true,0,0),
+        L('amsterdam','local_pod_dense','PODS Canal Ring','Centraal · Leidseplein · RAI · Schiphol · Noord'.split(' · '),18,60_000,false,250,900_000_000),
       ],
-      vienna:     [
-        { cityId: 'vienna', mode: 'u_bahn',             name: 'U-Bahn Wiener Linien', coverageRadiusKm: 22, dailyCapacity: 1_200_000, operational: true, openDay: 0, investmentEur: 0 },
-        { cityId: 'vienna', mode: 'tram',                name: 'Straßenbahn',       coverageRadiusKm: 18, dailyCapacity: 600_000, operational: true, openDay: 0,   investmentEur: 0 },
-        { cityId: 'vienna', mode: 'local_pod_dense',     name: 'PODS Ringstraße',   coverageRadiusKm: 25, dailyCapacity: 90_000,  operational: false, openDay: 220, investmentEur: 1_500_000_000 },
+      vienna: [
+        L('vienna','u_bahn','U1','Leopoldau · Praterstern · Stephansplatz · Südtirolerplatz · Oberlaa'.split(' · '),18,400_000,true,0,0),
+        L('vienna','u_bahn','U2','Seestadt · Stadion · Praterstern · Schottenring · Karlsplatz'.split(' · '),16,350_000,true,0,0),
+        L('vienna','u_bahn','U3','Ottakring · Westbahnhof · Stephansplatz · Landstraße · Simmering'.split(' · '),17,380_000,true,0,0),
+        L('vienna','u_bahn','U4','Heiligenstadt · Schottenring · Karlsplatz · Hütteldorf'.split(' · '),20,280_000,true,0,0),
+        L('vienna','u_bahn','U6','Floridsdorf · Spittelau · Westbahnhof · Philadelphiabr. · Siebenhirten'.split(' · '),22,320_000,true,0,0),
+        L('vienna','tram','1/2/D','Prater · Ring/Oper · Schottentor · Alserbachstr'.split(' · '),12,250_000,true,0,0),
+        L('vienna','tram','5/6/18','Westbahnhof · Mariahilfer Str · Karlsplatz · Hbf'.split(' · '),10,200_000,true,0,0),
+        L('vienna','tram','O/71','Ottakring · Gürtel · Karlsplatz · Rennweg · Simmering'.split(' · '),11,180_000,true,0,0),
+        L('vienna','local_pod_dense','PODS Ringstraße','Westbf · Karlsplatz · Ring · Stephansplatz · Hbf · Prater'.split(' · '),25,90_000,false,220,1_500_000_000),
       ],
-      zurich:     [
-        { cityId: 'zurich', mode: 's_bahn',             name: 'S-Bahn ZVV',       coverageRadiusKm: 50, dailyCapacity: 800_000, operational: true,  openDay: 0,   investmentEur: 0 },
-        { cityId: 'zurich', mode: 'tram',                name: 'VBZ Tram',         coverageRadiusKm: 10, dailyCapacity: 300_000, operational: true,  openDay: 0,   investmentEur: 0 },
-        { cityId: 'zurich', mode: 'gondola',             name: 'Polybahn',         coverageRadiusKm:  2, dailyCapacity:  10_000, operational: true,  openDay: 0,   investmentEur: 0 },
-        { cityId: 'zurich', mode: 'local_pod_dense',     name: 'PODS Limmat Line', coverageRadiusKm: 20, dailyCapacity: 50_000,  operational: false, openDay: 150, investmentEur: 700_000_000 },
+      zurich: [
+        L('zurich','s_bahn','S2/S8','Schaffhausen · Neuhausen · Hbf · Thalwil · Zug'.split(' · '),50,350_000,true,0,0),
+        L('zurich','s_bahn','S3/S9','Aarau · Baden · Hbf · Uster · Pfäffikon'.split(' · '),55,320_000,true,0,0),
+        L('zurich','s_bahn','S4/S6','Rapperswil · Wetzikon · Stadelhofen · Hbf · Winterthur'.split(' · '),45,280_000,true,0,0),
+        L('zurich','s_bahn','S10/S16','Glarus · Zollikon · Stadelhofen · Hbf · Oerlikon · Airport'.split(' · '),40,250_000,true,0,0),
+        L('zurich','tram','2/3/4','Brunau · Bellevue · Paradeplatz · HB · Milchbuck'.split(' · '),8,200_000,true,0,0),
+        L('zurich','tram','5/6/7/8','Werdhölzli · Paradeplatz · HB · Stadelhofen · Tiefenbrunnen'.split(' · '),10,220_000,true,0,0),
+        L('zurich','tram','10/11/14','Glattpark · Oerlikon · Hb · Enge · Altstetten'.split(' · '),12,180_000,true,0,0),
+        L('zurich','gondola','Polybahn','Central · ETH Hönggerberg'.split(' · '),2,10_000,true,0,0),
+        L('zurich','local_pod_dense','PODS Limmat','Airport · Oerlikon · HB · Enge · Thalwil'.split(' · '),20,50_000,false,150,700_000_000),
+      ],
+      brussels: [
+        L('brussels','u_bahn','M1/M5','Beekkant · Parc · Arts-Loi · Maelbeek · Herrmann-Debroux'.split(' · '),12,220_000,true,0,0),
+        L('brussels','u_bahn','M2/M6','Simonis · Rogier · Gare du Nord · Bourse · Midi · Forest'.split(' · '),14,200_000,true,0,0),
+        L('brussels','tram','3/4/7','Esplanade · Bourse · Châtelain · Boondael · ULB'.split(' · '),10,160_000,true,0,0),
+        L('brussels','tram','92/93/97','Schaerbeek · Rogier · Midi · Uccle · Moensberg'.split(' · '),12,140_000,true,0,0),
+        L('brussels','s_bahn','RER S1-S8','Airport · Gare du Nord · Midi · Braine-l\'Alleud'.split(' · '),40,300_000,true,0,0),
+        L('brussels','local_pod_dense','PODS EU Quarter','Midi · Bourse · Arts-Loi · Schuman · Airport'.split(' · '),18,60_000,false,180,800_000_000),
+      ],
+      cologne: [
+        L('cologne','u_bahn','1/7/9','Chorweiler · Dom/Hbf · Neumarkt · Buchforst'.split(' · '),12,160_000,true,0,0),
+        L('cologne','u_bahn','3/4/16/18','Mengenich · Neumarkt · Hbf · Mülheim · Bonn'.split(' · '),25,200_000,true,0,0),
+        L('cologne','tram','12/15','Junkersdorf · Neumarkt · Barbarossaplatz · Dellbrück'.split(' · '),10,100_000,true,0,0),
+        L('cologne','s_bahn','S6/S11/S12','Dormagen · Hbf · Deutz · Troisdorf · Bonn'.split(' · '),35,280_000,true,0,0),
+        L('cologne','local_pod_dense','PODS Rhein','Mülheim · Hbf · Deutz · Severinstr · Rodenkirchen'.split(' · '),15,40_000,false,200,700_000_000),
+      ],
+      stuttgart: [
+        L('stuttgart','s_bahn','S1/S2/S3','Kirchheim · Hbf · Stadtmitte · Vaihingen · Böblingen'.split(' · '),40,280_000,true,0,0),
+        L('stuttgart','s_bahn','S4/S5/S6','Backnang · Bad Cannstatt · Hbf · Leonberg · Weil'.split(' · '),45,260_000,true,0,0),
+        L('stuttgart','u_bahn','U1/U2/U4','Hauptbahnhof · Stadtmitte · Vaihingen · Möhringen'.split(' · '),14,160_000,true,0,0),
+        L('stuttgart','u_bahn','U5/U6/U7','Killesberg · Hbf · Bad Cannstatt · Mettingen'.split(' · '),16,140_000,true,0,0),
+        L('stuttgart','tram','Zacke','Marienplatz · Degerloch · Ruhbank'.split(' · '),4,12_000,true,0,0),
+        L('stuttgart','local_pod_dense','PODS Kessel','Hbf · Innenstadt · Vaihingen · Flughafen'.split(' · '),18,40_000,false,180,600_000_000),
+      ],
+      dusseldorf: [
+        L('dusseldorf','u_bahn','U70-U79','Krefeld · Rheinufertunnel · Hbf · Duisburg'.split(' · '),18,160_000,true,0,0),
+        L('dusseldorf','tram','701-709','Benrath · Hbf · Hauptbahnhof · Gerresheim'.split(' · '),12,120_000,true,0,0),
+        L('dusseldorf','s_bahn','S1/S6/S8','Solingen · Hbf · Airport · Duisburg · Essen'.split(' · '),30,220_000,true,0,0),
+        L('dusseldorf','local_pod_dense','PODS Rhein','Hbf · Altstadt · Airport · Messe · Morgenstraße'.split(' · '),16,35_000,false,180,500_000_000),
+      ],
+      copenhagen: [
+        L('copenhagen','s_bahn','S-Tog','Hillerød · Hellerup · Hbf · Airport · Køge'.split(' · '),40,320_000,true,0,0),
+        L('copenhagen','u_bahn','M1/M2','Vanløse · Frederiksberg · Kongens Nytorv · Airport'.split(' · '),15,200_000,true,0,0),
+        L('copenhagen','u_bahn','M3','Vanløse · City · Østerport · Artillerivej'.split(' · '),12,160_000,true,0,0),
+        L('copenhagen','local_pod_dense','PODS Öresund','Hbf · Christianshavn · Airport · Malmö'.split(' · '),22,55_000,false,200,900_000_000),
+      ],
+      lyon: [
+        L('lyon','u_bahn','A','Perrache · Bellecour · Part-Dieu · Vaulx-en-Velin'.split(' · '),14,180_000,true,0,0),
+        L('lyon','u_bahn','B/C','Oullins · Jean Macé · Saxe · Croix-Rousse'.split(' · '),10,140_000,true,0,0),
+        L('lyon','tram','T1/T2','Montrochet · Perrache · Charpennes · Eurexpo'.split(' · '),12,120_000,true,0,0),
+        L('lyon','tram','T3/T4','Part-Dieu · Grange Blanche · Jet d\'Eau · Meyzieu'.split(' · '),14,100_000,true,0,0),
+        L('lyon','local_pod_dense','PODS Lyon','Part-Dieu · Perrache · Bellecour · Airport'.split(' · '),16,45_000,false,180,600_000_000),
+      ],
+      prague: [
+        L('prague','u_bahn','A (green)','Nemocnice Motol · Dejvická · Náměstí Míru · Depo Hostivař'.split(' · '),15,200_000,true,0,0),
+        L('prague','u_bahn','B (yellow)','Zličín · Anděl · Centrum · Florenc · Černý Most'.split(' · '),18,220_000,true,0,0),
+        L('prague','u_bahn','C (red)','Letňany · Centrum · Hlavní nádraží · Háje'.split(' · '),16,210_000,true,0,0),
+        L('prague','tram','4/8/10','Výstaviště · Náměstí Republiky · Václavské · Nusle'.split(' · '),10,100_000,true,0,0),
+        L('prague','local_pod_dense','PODS Praha','Václavské · Hbf · Airport · Vinohrady'.split(' · '),15,40_000,false,200,700_000_000),
+      ],
+      warsaw: [
+        L('warsaw','u_bahn','M1','Kabaty · Ursynów · Centrum · Trocka'.split(' · '),14,180_000,true,0,0),
+        L('warsaw','u_bahn','M2','Bemowo · Rondo ONZ · Centrum · Stadion'.split(' · '),12,160_000,true,0,0),
+        L('warsaw','s_bahn','SKM W1-W5','Otwock · Centrum · Śródmieście · Airport · Pruszków'.split(' · '),35,250_000,true,0,0),
+        L('warsaw','tram','1/9/15','Annopol · Centrum · Wilanowska'.split(' · '),12,120_000,true,0,0),
+        L('warsaw','local_pod_dense','PODS Warszawa','Centrum · Airport · Stadion · Wilanów'.split(' · '),18,45_000,false,250,800_000_000),
+      ],
+      basel: [
+        L('basel','tram','1/2/3','Bottmingen · Claraplatz · SBB · Dreispitz'.split(' · '),10,80_000,true,0,0),
+        L('basel','tram','6/8/11','St.Louis · Barfüsserplatz · SBB · Riehen'.split(' · '),12,70_000,true,0,0),
+        L('basel','s_bahn','S-Bahn','Frick · Liestal · SBB · Mulhouse · Freiburg'.split(' · '),45,200_000,true,0,0),
+        L('basel','local_pod_dense','PODS Dreiländereck','SBB · Euro Airport · Kleinbasel · Weil'.split(' · '),14,30_000,false,120,400_000_000),
+      ],
+      geneva: [
+        L('geneva','tram','12/14/15','Aïre · Cornavin · Rive · Acacias · Bachet'.split(' · '),10,80_000,true,0,0),
+        L('geneva','tram','18','Airport · Sécheron · Cornavin · Palettes'.split(' · '),14,70_000,true,0,0),
+        L('geneva','s_bahn','Léman Express','Annecy · Cornavin · La Plaine · Lausanne'.split(' · '),50,160_000,true,0,0),
+        L('geneva','local_pod_dense','PODS Lac Léman','Airport · Cornavin · Rive · Carouge · Lancy'.split(' · '),12,35_000,false,150,450_000_000),
       ],
     };
 
     this.state.cities.forEach(city => {
-      const lines = cityLines[city.id] ?? [
-        { cityId: city.id, mode: 'tram' as InnercityMode, name: 'Local Transit', coverageRadiusKm: 8, dailyCapacity: 80_000, operational: true, openDay: 0, investmentEur: 0 },
-        { cityId: city.id, mode: 'local_pod_dense' as InnercityMode, name: 'PODS Local', coverageRadiusKm: 12, dailyCapacity: 30_000, operational: false, openDay: 100 + Math.floor(Math.random() * 200), investmentEur: 400_000_000 },
-      ];
+      const lines = cityLines[city.id] ?? (() => {
+        // Default for cities added dynamically: use population to scale
+        const hasBigRail = city.population > 500_000;
+        const result: InnercityLine[] = [];
+        if (hasBigRail) {
+          result.push(L(city.id,'s_bahn','Regional Rail',['North','Hbf','South','Airport'],
+            Math.min(40, city.population / 25_000), Math.round(city.population * 0.15), true, 0, 0));
+        }
+        result.push(L(city.id,'tram','Tram A',['North Terminal','City Centre','South Terminal'],
+          Math.min(12, city.population / 70_000), Math.round(city.population * 0.07), true, 0, 0));
+        result.push(L(city.id,'tram','Tram B',['East','City Centre','West Station'],
+          Math.min(10, city.population / 80_000), Math.round(city.population * 0.05), true, 0, 0));
+        result.push(L(city.id,'local_pod_dense','PODS Urban',['Hbf','Centre','Ring','Airport'],
+          Math.min(18, city.population / 45_000), Math.round(city.population * 0.04),
+          false, 100 + Math.floor(Math.random() * 200), Math.round(city.population * 200)));
+        return result;
+      })();
+
       const combined = this.computeInnercityCoverage(lines);
       this.state.innercityNetworks.push({
         cityId: city.id, lines, combinedCoverage: combined,
@@ -952,10 +1132,14 @@ export class PODSSimulationEngine {
   private computeInnercityCoverage(lines: InnercityLine[]): number {
     const opLines = lines.filter(l => l.operational);
     if (opLines.length === 0) return 0.10;
-    // Coverage is a function of radius and mode density (simplified)
+    // More lines + more modes = higher coverage. PODS dense network adds a boost.
+    const modeSet = new Set(opLines.map(l => l.mode));
+    const baseCov   = 0.12 + modeSet.size * 0.07;
     const maxRadius = Math.max(...opLines.map(l => l.coverageRadiusKm));
-    const modeBonus = opLines.some(l => l.mode === 'local_pod_dense') ? 0.15 : 0;
-    return Math.min(0.95, 0.30 + Math.log(maxRadius / 5 + 1) * 0.25 + modeBonus);
+    const radiusCov = Math.log(maxRadius / 5 + 1) * 0.18;
+    const lineDensity = Math.min(0.20, opLines.length * 0.025);
+    const podBonus  = opLines.some(l => l.mode === 'local_pod_dense') ? 0.12 : 0;
+    return Math.min(0.95, baseCov + radiusCov + lineDensity + podBonus);
   }
 
   private evolveInnercityNetworks(): void {
